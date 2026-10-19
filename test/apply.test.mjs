@@ -61,7 +61,8 @@ function makeCtx(options = {}) {
 test("插件名、provider id 与 inject 稳定", () => {
   assert.equal(name, "dsh-enhance");
   assert.equal(PROVIDER_ID, "dsh-enhance");
-  assert.deepEqual(inject, ["web"]);
+  // 不硬依赖任何服务：web 缺失时只降级搜索替换，不允许整插件加载失败。
+  assert.deepEqual(inject, []);
 });
 
 test("apply 各注册一个搜索与抓取提供方", () => {
@@ -308,6 +309,30 @@ test("推荐平台带提示文案键", () => {
   assert.equal(meta.find((platform) => platform.id === "parallel").tips.search, "tipParallelSearch");
   assert.equal(meta.find((platform) => platform.id === "tavily").tips.fetch, "tipTavilyFetch");
   assert.equal(meta.find((platform) => platform.id === "firecrawl").tips.fetch, "tipFirecrawlFetch");
+});
+
+test("宿主没有 web 服务时插件仍能加载，只失去搜索替换", () => {
+  const routes = [];
+  const ctx = {
+    get: () => undefined,
+    inject(keys, callback) {
+      // web 缺失：cordis 永远不回调；webServer 存在：照常挂路由。
+      if (keys.includes("web")) return () => {};
+      if (keys.includes("webServer")) {
+        callback({ webServer: { register(route) { routes.push(route.path); return () => {}; } } });
+      }
+      return () => {};
+    },
+    logger: { warn() {} },
+  };
+  const dispose = apply(ctx, makeConfig());
+  assert.deepEqual(routes, [
+    "/dsh-enhance/move-session",
+    "/dsh-enhance/move-workspace",
+    "/dsh-enhance/delete-session",
+    "/dsh-enhance/list-workspaces",
+  ]);
+  assert.equal(typeof dispose, "function");
 });
 
 test("抓取遇到 404 时直接返回结果，不降级再花一次额度", async () => {
