@@ -1,0 +1,16 @@
+# DSH-Enhance：把会话管理增强与「多平台优先-候补」的搜索/抓取替换装进一个插件。
+#
+#   web_search / web_fetch -> 本插件注册的 dsh-enhance provider
+#     优先平台失败（key 失效、额度不足、被反爬、抓不到正文……）时自动换成候补平台。
+#     关闭「搜索功能替换」后，本 provider 会把请求转交给宿主内置 provider。
+#
+# 本行同时是插件配置命名空间（设置页写入的那份配置）。
+- insert:
+    - id: dsh-enhance
+      name: 'dsh-enhance'
+
+# 覆盖内置的 provider 选择（原行只有这两个键，patch 会替换整行 config）。
+- id: web
+  config:
+    searchProvider: dsh-enhance
+    fetchProvider: dsh-enhance
