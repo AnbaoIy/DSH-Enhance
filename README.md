@@ -57,12 +57,15 @@ DeepSeek 账号令牌、端点、超时都由宿主自己决定，本插件不�
 
 ## 移动与删除的实现要点
 
-- **工作区成员资格由会话 header 的 `cwd` 决定，而 header 不可改写**。所以「移动」不是在原文件上改字段，而是：
-  在目标工作区路径下用 `sessionPersistence.create()` 重建一份携带完整历史（同 `createdAt` / `agentPreset` / 事件序列）的新会话，
-  让目标工作区 `attachSession(newId)`，再从源工作区 `detachSession`，最后 `archiveSession` 原会话。
+- **工作区成员资格由会话 header 的 `cwd` 决定，而 header 不可改写**。所以「移动」不是在原文件上改字段，而是
+  在目标工作区路径下重建一份携带完整历史（同 `createdAt` / `agentPreset` / 事件序列）的新会话。
+  重建走运行时 `sessions.create({ seed })` 而不是直接写持久层：绕过 store 建出来的会话没有标题投影，
+  列表里会显示成「未命名空对话」。新会话 `attachSession(newId)`、源工作区 `detachSession` 之后，
+  **原会话直接删除**（不 `archiveSession`）—— 归档会在归档列表里留下一份副本，看起来像多出一个对话。
 - **删除**走 `sessionPersistence.locate(header)` 找到转录文件，先校验文件名符合 `session*.jsonl(.zstd)`，
   只有目录里只剩该会话自己的工件时才连目录一起删，绝不误伤同目录下的其它文件。
   删完再摘工作区记账、清归档标记、清 spill，并给注册表的内存索引留一个墓碑，挡住 stale `list()` 把已删会话重新编入。
+  迁移复用的就是这个删除通道，所以迁移不会连带影响任何其它会话的归档状态。
 
 ## 宿主路由
 
