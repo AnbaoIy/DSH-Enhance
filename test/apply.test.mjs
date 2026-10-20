@@ -330,6 +330,8 @@ test("宿主没有 web 服务时插件仍能加载，只失去搜索替换", () 
     "/dsh-enhance/move-session",
     "/dsh-enhance/move-workspace",
     "/dsh-enhance/delete-session",
+    "/dsh-enhance/move-history",
+    "/dsh-enhance/restore-session",
     "/dsh-enhance/list-workspaces",
   ]);
   assert.equal(typeof dispose, "function");

@@ -7,12 +7,28 @@
  *   3. 原会话必须被删除，而不是 archiveSession（否则归档列表里会多出一份）。
  */
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { moveSession, moveWorkspace } from "../lib/session-ops.js";
+import { listMoveHistory, moveSession, moveWorkspace, pruneMoveHistory, restoreSession } from "../lib/session-ops.js";
+
+/** 迁移记录与备份的落盘根（register-shims.mjs 已把 DSH_HOME 指到临时目录）。 */
+function moverDir() {
+  return join(process.env.DSH_HOME, "workspace-mover");
+}
+
+/** 每个用例从空的记录目录开始，避免用例之间互相干扰。 */
+async function resetMoverDir() {
+  await rm(moverDir(), { recursive: true, force: true });
+  await mkdir(moverDir(), { recursive: true });
+}
+
+/** 读 history.json。 */
+async function readHistory() {
+  return JSON.parse(await readFile(join(moverDir(), "history.json"), "utf8"));
+}
 
 /**
  * 造一个最小的假宿主，只实现迁移路径用到的成员。
@@ -97,6 +113,7 @@ async function makeWorld(options = {}) {
         ],
       };
     },
+    async readTitle() { return "测试对话"; },
   };
 
   const sessionPersistence = {
@@ -139,6 +156,7 @@ async function makeWorld(options = {}) {
 }
 
 test("迁移把完整历史写进持久层，并且不把新会话塞进运行时 store", async () => {
+  await resetMoverDir();
   const world = await makeWorld();
   const result = await moveSession(world.ctx, "session-old", world.target.id);
 
@@ -171,9 +189,26 @@ test("迁移把完整历史写进持久层，并且不把新会话塞进运行�
   assert.equal(world.archived.length, 0);
   const leftovers = await readdir(world.root).catch(() => []);
   assert.equal(leftovers.includes("session.v4.jsonl"), false);
+
+  // 删除之前必须留下备份：备份文件 + history.json 各一份。
+  assert.match(result.backupId, /^[0-9a-f-]{36}$/u);
+  const backups = await readdir(join(moverDir(), "backups"));
+  assert.deepEqual(backups, [`${result.backupId}.json`]);
+  const backup = JSON.parse(await readFile(join(moverDir(), "backups", `${result.backupId}.json`), "utf8"));
+  assert.equal(backup.title, "测试对话");
+  assert.equal(backup.events.length, 2);
+  assert.equal(backup.header.cwd, world.source.path);
+  const history = await readHistory();
+  assert.equal(history.length, 1);
+  assert.equal(history[0].backupId, result.backupId);
+  assert.equal(history[0].sourceTitle, "Source");
+  assert.equal(history[0].targetTitle, "Target");
+  assert.equal(history[0].from, world.source.path);
+  assert.equal(history[0].to, world.target.path);
 });
 
 test("批量迁移按快照遍历，全部走同一条落盘路径", async () => {
+  await resetMoverDir();
   const world = await makeWorld();
   world.source.sessionIds = ["session-old"];
   const result = await moveWorkspace(world.ctx, world.source.id, world.target.id);
@@ -185,9 +220,11 @@ test("批量迁移按快照遍历，全部走同一条落盘路径", async () =>
   assert.equal(world.archived.length, 0);
   assert.equal(world.target.sessionIds.length, 1);
   assert.equal(world.target.sessionIds[0], world.persisted[0].header.id);
+  assert.equal((await readHistory()).length, 1);
 });
 
 test("写盘失败时保留原会话，不做半吊子迁移", async () => {
+  await resetMoverDir();
   const world = await makeWorld({ failCreate: true });
   const result = await moveSession(world.ctx, "session-old", world.target.id);
 
@@ -199,9 +236,12 @@ test("写盘失败时保留原会话，不做半吊子迁移", async () => {
   assert.deepEqual(world.target.sessionIds, []);
   const leftovers = await readdir(world.root).catch(() => []);
   assert.equal(leftovers.includes("session.v4.jsonl"), true);
+  // 失败不写迁移记录。
+  assert.deepEqual(await readHistory().catch(() => []), []);
 });
 
 test("宿主没有持久化后端时退回纯内存重建", async () => {
+  await resetMoverDir();
   const world = await makeWorld({ withoutPersistence: true });
   const result = await moveSession(world.ctx, "session-old", world.target.id);
 
@@ -213,6 +253,7 @@ test("宿主没有持久化后端时退回纯内存重建", async () => {
 });
 
 test("目标工作区不存在时给出可读错误，不创建任何会话", async () => {
+  await resetMoverDir();
   const world = await makeWorld();
   const result = await moveSession(world.ctx, "session-old", "ws-missing");
 
@@ -220,4 +261,105 @@ test("目标工作区不存在时给出可读错误，不创建任何会话", as
   assert.match(result.error, /目标工作区不存在/u);
   assert.equal(world.created.length, 0);
   assert.equal(world.prepares.length, 0);
+});
+
+test("迁移记录可以列出来，并能用备份恢复到源工作区", async () => {
+  await resetMoverDir();
+  const world = await makeWorld();
+  const moved = await moveSession(world.ctx, "session-old", world.target.id);
+  assert.equal(moved.ok, true, JSON.stringify(moved));
+
+  const listed = await listMoveHistory(world.ctx);
+  assert.equal(listed.ok, true);
+  assert.equal(listed.items.length, 1);
+  assert.equal(listed.items[0].backupId, moved.backupId);
+  assert.equal(listed.items[0].title, "测试对话");
+  assert.equal(listed.items[0].fromTitle, "Source");
+  assert.equal(listed.items[0].toTitle, "Target");
+  assert.equal(listed.items[0].restorable, true);
+
+  const restored = await restoreSession(world.ctx, moved.backupId);
+  assert.equal(restored.ok, true, JSON.stringify(restored));
+  assert.match(restored.sessionId, /^session-[0-9a-f-]{36}$/u);
+  assert.equal(restored.workspaceId, world.source.id, "恢复应回到迁移前的源工作区");
+
+  // 恢复出来的会话同样落盘、被源工作区接管。
+  const restoredRecord = world.persisted.at(-1);
+  assert.equal(restoredRecord.header.id, restored.sessionId);
+  assert.equal(restoredRecord.header.cwd, world.source.path);
+  assert.equal(restoredRecord.events.length, 2);
+  assert.equal(restoredRecord.closed, true);
+  assert.ok(world.source.sessionIds.includes(restored.sessionId));
+
+  // 记录被标记为已恢复，备份仍保留（允许再次恢复）。
+  const after = await readHistory();
+  assert.equal(typeof after[0].restoredAt, "string");
+  assert.equal(after[0].restoredSessionId, restored.sessionId);
+  assert.deepEqual(await readdir(join(moverDir(), "backups")), [`${moved.backupId}.json`]);
+});
+
+test("老记录没有备份文件时只展示、不可恢复", async () => {
+  await resetMoverDir();
+  await writeFile(join(moverDir(), "history.json"), JSON.stringify([{
+    id: "session-legacy",
+    sessionId: "session-legacy",
+    title: "旧记录",
+    sourceWorkspaceId: null,
+    targetWorkspaceId: "ws-target",
+    from: "C:/old",
+    to: "C:/new",
+    movedAt: new Date().toISOString(),
+  }]), "utf8");
+  const world = await makeWorld();
+
+  const listed = await listMoveHistory(world.ctx);
+  assert.equal(listed.items.length, 1);
+  assert.equal(listed.items[0].restorable, false);
+
+  const restored = await restoreSession(world.ctx, "session-legacy");
+  assert.equal(restored.ok, false);
+  assert.match(restored.error, /备份 id 不合法/u);
+});
+
+test("超过保留期的记录与备份在启动清理时被删除", async () => {
+  await resetMoverDir();
+  const now = Date.parse("2026-10-20T00:00:00.000Z");
+  const staleId = "11111111-1111-4111-8111-111111111111";
+  const freshId = "22222222-2222-4222-8222-222222222222";
+  await mkdir(join(moverDir(), "backups"), { recursive: true });
+  for (const id of [staleId, freshId]) {
+    await writeFile(join(moverDir(), "backups", `${id}.json`), JSON.stringify({
+      version: 1,
+      backupId: id,
+      header: { id: "session-x", cwd: "C:/x", createdAt: 1 },
+      events: [],
+    }), "utf8");
+  }
+  await writeFile(join(moverDir(), "history.json"), JSON.stringify([
+    { id: staleId, backupId: staleId, movedAt: "2026-10-10T00:00:00.000Z" },
+    { id: freshId, backupId: freshId, movedAt: "2026-10-19T12:00:00.000Z" },
+  ]), "utf8");
+
+  const result = await pruneMoveHistory(now);
+  assert.equal(result.removedRecords, 1);
+  assert.equal(result.removedBackups, 1);
+  const kept = await readHistory();
+  assert.deepEqual(kept.map((item) => item.id), [freshId]);
+  assert.deepEqual(await readdir(join(moverDir(), "backups")), [`${freshId}.json`]);
+});
+
+test("没有记录指向的孤儿备份也会按年龄清掉", async () => {
+  await resetMoverDir();
+  const orphanId = "33333333-3333-4333-8333-333333333333";
+  await mkdir(join(moverDir(), "backups"), { recursive: true });
+  await writeFile(join(moverDir(), "backups", `${orphanId}.json`), "{}", "utf8");
+  // 把文件改成 10 天前。
+  const { utimes } = await import("node:fs/promises");
+  const old = (Date.now() - 10 * 24 * 60 * 60 * 1000) / 1000;
+  await utimes(join(moverDir(), "backups", `${orphanId}.json`), old, old);
+  await writeFile(join(moverDir(), "history.json"), "[]", "utf8");
+
+  const result = await pruneMoveHistory();
+  assert.equal(result.removedBackups, 1);
+  assert.deepEqual(await readdir(join(moverDir(), "backups")), []);
 });
