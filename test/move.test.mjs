@@ -1,9 +1,10 @@
 /**
  * 迁移语义的回归测试。
  *
- * 重点盯住两个曾经出错的行为：
- *   1. 迁移必须通过运行时 sessions.create 重建（否则列表里是「未命名空对话」）；
- *   2. 原会话必须被删除，而不是 archiveSession（否则归档列表里会多出一份）。
+ * 重点盯住三个曾经出错的行为：
+ *   1. 重建的会话必须真的写入持久层（只建内存会话会让它「点不开、重启就没」）；
+ *   2. 重建的会话不能进入运行时 store（否则之后的 resume 会撞 "session already exists"）；
+ *   3. 原会话必须被删除，而不是 archiveSession（否则归档列表里会多出一份）。
  */
 import assert from "node:assert/strict";
 import { mkdtemp, readdir, writeFile } from "node:fs/promises";
@@ -13,8 +14,12 @@ import test from "node:test";
 
 import { moveSession, moveWorkspace } from "../lib/session-ops.js";
 
-/** 造一个最小的假宿主，只实现迁移路径用到的成员。 */
-async function makeWorld() {
+/**
+ * 造一个最小的假宿主，只实现迁移路径用到的成员。
+ * @param options.failCreate - 让持久层 create 抛错，用于验证失败时不删原会话。
+ * @param options.withoutPersistence - 模拟没有持久化后端的宿主。
+ */
+async function makeWorld(options = {}) {
   const root = await mkdtemp(join(tmpdir(), "dsh-enhance-move-"));
   // 官方 JSONL 后端的工件名是 session.v<N>.jsonl，删除前会校验这个名字。
   const transcript = join(root, "session.v4.jsonl");
@@ -23,6 +28,9 @@ async function makeWorld() {
   const created = [];
   const archived = [];
   const removedNotifications = [];
+  const persisted = [];
+  const prepares = [];
+  let flushAll = 0;
 
   const target = {
     id: "ws-target",
@@ -48,16 +56,33 @@ async function makeWorld() {
       return undefined;
     },
     list() { return [source, target]; },
-    async archiveSession(id, options) { archived.push({ id, options }); },
+    async archiveSession(id, opts) { archived.push({ id, options: opts }); },
     async unarchiveSession() {},
   };
 
   const sessions = {
-    create(id, options) {
-      created.push({ id, options });
-      return { id: "session-new", header: { id: "session-new" } };
+    create(id, opts) {
+      created.push({ id, options: opts });
+      return { id, header: { id } };
     },
-    async flush() {},
+    prepare(id, opts) {
+      prepares.push({ id, options: opts });
+      const header = {
+        version: 4,
+        id,
+        createdAt: opts?.meta?.createdAt ?? 1,
+        cwd: opts?.meta?.cwd,
+        isSeeded: opts?.meta?.isSeeded === true,
+        ...(opts?.meta?.agentPreset === undefined ? {} : { agentPreset: opts.meta.agentPreset }),
+        ...(opts?.meta?.origin === undefined ? {} : { origin: opts.meta.origin }),
+      };
+      return {
+        header,
+        inheritedEventCount: opts?.inheritedEventCount ?? 0,
+        snapshotEvents() { return [...(opts?.seed ?? [])]; },
+      };
+    },
+    async flush() { flushAll += 1; },
     get() { return undefined; },
   };
 
@@ -75,14 +100,28 @@ async function makeWorld() {
   };
 
   const sessionPersistence = {
-    async locate() { return { path: transcript }; },
+    async locate(header) {
+      // 真实后端按 header.cwd + id 定位；原会话的工件就是 transcript。
+      if (header.id === "session-old") return { path: transcript };
+      return { path: join(root, "target", header.id, "session.v4.jsonl") };
+    },
+    async create(header, opts) {
+      if (options.failCreate === true) throw new Error("disk full");
+      const record = { header, inheritedEventCount: opts?.inheritedEventCount ?? 0, events: [], flushed: 0, closed: false };
+      persisted.push(record);
+      return {
+        async append(events) { record.events.push(...events); },
+        async flush() { record.flushed += 1; },
+        async close() { record.closed = true; },
+      };
+    },
   };
 
   const services = {
     workspaceRegistry: registry,
     sessions,
     sessionQuery,
-    sessionPersistence,
+    sessionPersistence: options.withoutPersistence === true ? undefined : sessionPersistence,
     sessionProjectionCache: { async delete() {} },
     agents: { get() { return undefined; } },
     spillStore: undefined,
@@ -93,26 +132,39 @@ async function makeWorld() {
     emit(name, payload) { removedNotifications.push({ name, payload }); },
   };
 
-  return { ctx, root, transcript, created, archived, removedNotifications, target, source };
+  return {
+    ctx, root, transcript, created, archived, removedNotifications, target, source,
+    persisted, prepares, flushAll: () => flushAll,
+  };
 }
 
-test("迁移用 sessions.create 重建，并删除原会话而不是归档", async () => {
+test("迁移把完整历史写进持久层，并且不把新会话塞进运行时 store", async () => {
   const world = await makeWorld();
   const result = await moveSession(world.ctx, "session-old", world.target.id);
 
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(result.newSessionId, "session-new");
+  assert.match(result.newSessionId, /^session-[0-9a-f-]{36}$/u, "新 id 必须自己 mint，避免撞磁盘上已有的 session-<n>");
   assert.equal(result.removedSessionId, "session-old");
 
-  // 走了运行时 store，而不是直接写持久层。
-  assert.equal(world.created.length, 1);
-  const { options } = world.created[0];
-  assert.equal(options.meta.cwd, world.target.path);
-  assert.equal(options.meta.createdAt, 1_700_000_000_000);
-  assert.equal(options.seed.length, 2);
+  // 走 prepare + 持久层，而不是 sessions.create（后者只写内存）。
+  assert.equal(world.created.length, 0, "不能再用 sessions.create 造会话");
+  assert.equal(world.prepares.length, 1);
+  assert.equal(world.prepares[0].id, result.newSessionId);
+  assert.equal(world.prepares[0].options.meta.cwd, world.target.path);
+  assert.equal(world.prepares[0].options.meta.createdAt, 1_700_000_000_000);
+  assert.equal(world.prepares[0].options.seed.length, 2);
+
+  // 历史真的落到目标目录，句柄被关闭，后续 resume 才能 open(write)。
+  assert.equal(world.persisted.length, 1, "必须调用一次 sessionPersistence.create");
+  const record = world.persisted[0];
+  assert.equal(record.header.id, result.newSessionId);
+  assert.equal(record.header.cwd, world.target.path);
+  assert.equal(record.events.length, 2);
+  assert.equal(record.flushed, 1);
+  assert.equal(record.closed, true);
 
   // 目标工作区接管、源工作区摘除。
-  assert.deepEqual(world.target.sessionIds, ["session-new"]);
+  assert.deepEqual(world.target.sessionIds, [result.newSessionId]);
   assert.deepEqual(world.source.sessionIds, []);
 
   // 原会话被物理删除（目录里只剩它自己的工件时整目录一起删，所以两种都算通过）。
@@ -121,7 +173,7 @@ test("迁移用 sessions.create 重建，并删除原会话而不是归档", asy
   assert.equal(leftovers.includes("session.v4.jsonl"), false);
 });
 
-test("批量迁移按快照遍历，全部走同一条路径", async () => {
+test("批量迁移按快照遍历，全部走同一条落盘路径", async () => {
   const world = await makeWorld();
   world.source.sessionIds = ["session-old"];
   const result = await moveWorkspace(world.ctx, world.source.id, world.target.id);
@@ -129,8 +181,35 @@ test("批量迁移按快照遍历，全部走同一条路径", async () => {
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.movedCount, 1);
   assert.equal(result.failedCount, 0);
+  assert.equal(world.persisted.length, 1);
   assert.equal(world.archived.length, 0);
-  assert.deepEqual(world.target.sessionIds, ["session-new"]);
+  assert.equal(world.target.sessionIds.length, 1);
+  assert.equal(world.target.sessionIds[0], world.persisted[0].header.id);
+});
+
+test("写盘失败时保留原会话，不做半吊子迁移", async () => {
+  const world = await makeWorld({ failCreate: true });
+  const result = await moveSession(world.ctx, "session-old", world.target.id);
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /创建目标会话失败/u);
+  assert.equal(world.persisted.length, 0);
+  // 原会话仍在源工作区记账里，文件也没被删。
+  assert.deepEqual(world.source.sessionIds, ["session-old"]);
+  assert.deepEqual(world.target.sessionIds, []);
+  const leftovers = await readdir(world.root).catch(() => []);
+  assert.equal(leftovers.includes("session.v4.jsonl"), true);
+});
+
+test("宿主没有持久化后端时退回纯内存重建", async () => {
+  const world = await makeWorld({ withoutPersistence: true });
+  const result = await moveSession(world.ctx, "session-old", world.target.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(world.persisted.length, 0);
+  assert.equal(world.created.length, 1);
+  assert.equal(world.prepares.length, 0);
+  assert.deepEqual(world.target.sessionIds, [result.newSessionId]);
 });
 
 test("目标工作区不存在时给出可读错误，不创建任何会话", async () => {
@@ -138,6 +217,7 @@ test("目标工作区不存在时给出可读错误，不创建任何会话", as
   const result = await moveSession(world.ctx, "session-old", "ws-missing");
 
   assert.equal(result.ok, false);
-  assert.match(result.error, /目标工作区不存在/);
+  assert.match(result.error, /目标工作区不存在/u);
   assert.equal(world.created.length, 0);
+  assert.equal(world.prepares.length, 0);
 });

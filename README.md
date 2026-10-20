@@ -10,10 +10,10 @@ DSH（DeepSeek Harness）插件，三件事合一：
 
 ```bash
 git clone https://github.com/AnbaoIy/DSH-Enhance.git
-dsh plugin --profile <profile> add link:<克隆下来的绝对路径>
+dsh plugin --profile desktop add link:C:/path/to/DSH-Enhance
 ```
 
-或直接改 `~/.dsh/profiles/<profile>/package.json`：
+或直接改 `~/.dsh/profiles/desktop/package.json`：
 
 ```json
 {
@@ -75,15 +75,15 @@ Parallel 没有抓取接口，所以抓取侧只有三个平台。
 | `totalTimeoutMs` / `platformTimeoutMs` | `28000` / `15000` | 整链预算 / 单平台超时 |
 | `minChars` | `500` | 正文短于此值视为没抓到，换下一家；`0` 关闭 |
 | `maxResults` / `onlyMainContent` | `8` / `true` | 搜索结果数 / 只保留正文 |
-| `<平台>ApiKey` | 空 | key，`secret` 字段，不写入设置文件 |
-| `<平台>KeyEnv` | `PARALLEL_API_KEY` 等 | 凭据引用名 |
-| `<平台>BaseURL` | 各平台端点 | 自建代理时改这里 |
+| `parallelApiKey` 等 | 空 | 各平台 key，`secret` 字段，不写入设置文件 |
+| `parallelKeyEnv` 等 | `PARALLEL_API_KEY` 等 | 凭据引用名 |
+| `parallelBaseURL` 等 | 各平台端点 | 自建代理时改这里 |
 
 密钥经 `ctx.remote.credentials.set()` 存入凭据服务，不进设置文件、不进日志。
 
 ## 实现要点
 
-- **迁移**用运行时 `sessions.create({ seed })` 重建（绕过 store 会得到没有标题投影的「未命名空对话」），`attachSession` 后**删除**原会话。不调 `archiveSession` —— 归档会在列表里留下副本，看起来像多出一个对话。
+- **迁移**先 `sessions.prepare({ seed })` 只构造新会话（**不进入**运行时 store，否则之后打开它会撞上 `session already exists`），再用 `sessionPersistence.create/append/flush/close` 把同一份历史写进目标目录；写盘成功后才 `attachSession` 并**删除**原会话。只建内存会话会让对话「看着在、点不开、重启就没」。不调 `archiveSession` —— 归档会在列表里留下副本，看起来像多出一个对话。
 - **删除**用 `sessionPersistence.locate(header)` 定位转录文件，先校验文件名符合 `session*.jsonl(.zstd)`，仅当目录里只剩该会话自己的工件时才连目录一起删；随后摘工作区记账、清归档标记与 spill，并留一个墓碑挡住 stale `list()` 重新编入。迁移复用这条通道，不会连带影响其它会话。
 
 ## 宿主路由
