@@ -1,6 +1,6 @@
 # DSH-Enhance
 
-DSH（DeepSeek Harness）插件，给会话管理和网页搜索加四件事。
+DSH会话删除，工作区迁移，搜索换源插件
 
 ## 功能
 
