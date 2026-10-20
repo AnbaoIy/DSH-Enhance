@@ -27,7 +27,6 @@ DSH（DeepSeek Harness）插件，给会话管理和网页搜索加四件事。
 
 | 平台 | 搜索 | 抓取 | 免费额度 |
 | --- | --- | --- | --- |
-| DeepSeek 官方 | ✅ | ✅ | 由「设置 → 网页搜索」管理 |
 | Parallel | ✅ | — | 每月 5,000 次 |
 | Tavily | ✅ | ✅ | 每月 1,000 credits |
 | Firecrawl | ✅ | ✅ | 每月 1,000 credits |
