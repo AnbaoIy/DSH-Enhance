@@ -110,10 +110,15 @@ async function makeWorld(options = {}) {
         events: [
           { seq: 0, time: 1, type: "session/start", data: {} },
           { seq: 1, time: 2, type: "message/user", data: { text: "hi" } },
+          { seq: 2, time: 3, type: "session/title", data: { title: "真实标题", source: "user" } },
         ],
       };
     },
-    async readTitle() { return "测试对话"; },
+    // 标题应从日志事件折叠，而不是依赖宿主 readTitle。
+    async readTitle() { return "宿主标题"; },
+    async readTitleSnapshots(ids) {
+      return ids.map((id) => ({ status: "fulfilled", value: { session: { id }, title: "补回来的标题" } }));
+    },
   };
 
   const sessionPersistence = {
@@ -170,14 +175,14 @@ test("迁移把完整历史写进持久层，并且不把新会话塞进运行�
   assert.equal(world.prepares[0].id, result.newSessionId);
   assert.equal(world.prepares[0].options.meta.cwd, world.target.path);
   assert.equal(world.prepares[0].options.meta.createdAt, 1_700_000_000_000);
-  assert.equal(world.prepares[0].options.seed.length, 2);
+  assert.equal(world.prepares[0].options.seed.length, 3);
 
   // 历史真的落到目标目录，句柄被关闭，后续 resume 才能 open(write)。
   assert.equal(world.persisted.length, 1, "必须调用一次 sessionPersistence.create");
   const record = world.persisted[0];
   assert.equal(record.header.id, result.newSessionId);
   assert.equal(record.header.cwd, world.target.path);
-  assert.equal(record.events.length, 2);
+  assert.equal(record.events.length, 3);
   assert.equal(record.flushed, 1);
   assert.equal(record.closed, true);
 
@@ -195,8 +200,8 @@ test("迁移把完整历史写进持久层，并且不把新会话塞进运行�
   const backups = await readdir(join(moverDir(), "backups"));
   assert.deepEqual(backups, [`${result.backupId}.json`]);
   const backup = JSON.parse(await readFile(join(moverDir(), "backups", `${result.backupId}.json`), "utf8"));
-  assert.equal(backup.title, "测试对话");
-  assert.equal(backup.events.length, 2);
+  assert.equal(backup.title, "真实标题");
+  assert.equal(backup.events.length, 3);
   assert.equal(backup.header.cwd, world.source.path);
   const history = await readHistory();
   assert.equal(history.length, 1);
@@ -273,7 +278,7 @@ test("迁移记录可以列出来，并能用备份恢复到源工作区", async
   assert.equal(listed.ok, true);
   assert.equal(listed.items.length, 1);
   assert.equal(listed.items[0].backupId, moved.backupId);
-  assert.equal(listed.items[0].title, "测试对话");
+  assert.equal(listed.items[0].title, "真实标题");
   assert.equal(listed.items[0].fromTitle, "Source");
   assert.equal(listed.items[0].toTitle, "Target");
   assert.equal(listed.items[0].restorable, true);
@@ -287,7 +292,7 @@ test("迁移记录可以列出来，并能用备份恢复到源工作区", async
   const restoredRecord = world.persisted.at(-1);
   assert.equal(restoredRecord.header.id, restored.sessionId);
   assert.equal(restoredRecord.header.cwd, world.source.path);
-  assert.equal(restoredRecord.events.length, 2);
+  assert.equal(restoredRecord.events.length, 3);
   assert.equal(restoredRecord.closed, true);
   assert.ok(world.source.sessionIds.includes(restored.sessionId));
 
@@ -319,6 +324,29 @@ test("老记录没有备份文件时只展示、不可恢复", async () => {
   const restored = await restoreSession(world.ctx, "session-legacy");
   assert.equal(restored.ok, false);
   assert.match(restored.error, /备份 id 不合法/u);
+});
+
+test("标题被存成会话 id 的记录会用迁移后的会话补回真实标题", async () => {
+  await resetMoverDir();
+  const backupId = "44444444-4444-4444-8444-444444444444";
+  await writeFile(join(moverDir(), "history.json"), JSON.stringify([{
+    id: backupId,
+    backupId,
+    sessionId: "session-old",
+    newSessionId: "session-abcdef01-2345-4678-9abc-def012345678",
+    title: "session-old",
+    sourceWorkspaceId: null,
+    targetWorkspaceId: "ws-target",
+    from: "C:/old",
+    to: "C:/new",
+    movedAt: new Date().toISOString(),
+  }]), "utf8");
+  await mkdir(join(moverDir(), "backups"), { recursive: true });
+  const world = await makeWorld();
+
+  const listed = await listMoveHistory(world.ctx);
+  assert.equal(listed.items[0].title, "补回来的标题");
+  assert.equal(listed.items[0].newSessionId, undefined, "内部字段不能漏给客户端");
 });
 
 test("超过保留期的记录与备份在启动清理时被删除", async () => {
