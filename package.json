@@ -5,11 +5,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AnbaoIy/DSH-WebEnhance.git"
+    "url": "git+https://github.com/AnbaoIy/DSH-Enhance.git"
   },
-  "homepage": "https://github.com/AnbaoIy/DSH-WebEnhance#readme",
+  "homepage": "https://github.com/AnbaoIy/DSH-Enhance#readme",
   "bugs": {
-    "url": "https://github.com/AnbaoIy/DSH-WebEnhance/issues"
+    "url": "https://github.com/AnbaoIy/DSH-Enhance/issues"
   },
   "type": "module",
   "main": "lib/index.js",
