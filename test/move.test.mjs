@@ -139,12 +139,18 @@ async function makeWorld(options = {}) {
     },
   };
 
+  const cached = [];
   const services = {
     workspaceRegistry: registry,
     sessions,
     sessionQuery,
     sessionPersistence: options.withoutPersistence === true ? undefined : sessionPersistence,
-    sessionProjectionCache: { async delete() {} },
+    sessionProjectionCache: {
+      async delete() {},
+      coldSnapshot(header, inheritedEventCount, events) {
+        cached.push({ id: header.id, inheritedEventCount, count: events.length });
+      },
+    },
     agents: { get() { return undefined; } },
     spillStore: undefined,
   };
@@ -156,7 +162,7 @@ async function makeWorld(options = {}) {
 
   return {
     ctx, root, transcript, created, archived, removedNotifications, target, source,
-    persisted, prepares, flushAll: () => flushAll,
+    persisted, prepares, cached, flushAll: () => flushAll,
   };
 }
 
@@ -194,6 +200,11 @@ test("迁移把完整历史写进持久层，并且不把新会话塞进运行�
   assert.equal(world.archived.length, 0);
   const leftovers = await readdir(world.root).catch(() => []);
   assert.equal(leftovers.includes("session.v4.jsonl"), false);
+
+  // 迁移后立刻预热投影缓存，否则侧边栏要等用户点开才显示标题。
+  assert.equal(world.cached.length, 1);
+  assert.equal(world.cached[0].id, result.newSessionId);
+  assert.equal(world.cached[0].count, 3);
 
   // 删除之前必须留下备份：备份文件 + history.json 各一份。
   assert.match(result.backupId, /^[0-9a-f-]{36}$/u);
