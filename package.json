@@ -1,7 +1,7 @@
 {
   "name": "dsh-enhance",
-  "version": "1.1.0",
-  "description": "DSH-Enhance: 会话移动/删除增强，以及多平台优先-候补的搜索与抓取替换。",
+  "version": "1.2.0",
+  "description": "DSH-Enhance: 会话迁移（含备份与迁移记录恢复）/ 删除增强，以及多平台优先-候补的搜索与抓取替换。",
   "license": "MIT",
   "repository": {
     "type": "git",
